@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 const API = import.meta.env.VITE_API_URL || `http://${location.hostname}:4000/api`;
 
+// Identificador anónimo por celular/navegador
 function obtenerClienteId() {
   let id = localStorage.getItem('clienteId');
   if (!id) {
@@ -12,8 +13,11 @@ function obtenerClienteId() {
 }
 const clienteId = obtenerClienteId();
 
+const PISOS = [1, 2];
+
+// Geometría del plano (viewBox 380 x 360). n = número del lugar dentro del piso (1 a 6)
 const COLS = [105, 210, 315];
-const info = (id) => ({ cx: COLS[(id - 1) % 3], col: (id - 1) % 3, arriba: id <= 3 });
+const info = (n) => ({ cx: COLS[(n - 1) % 3], col: (n - 1) % 3, arriba: n <= 3 });
 const centroY = (arriba) => (arriba ? 82 : 278);
 const rectY = (arriba) => (arriba ? 24 : 220);
 
@@ -27,12 +31,15 @@ const json = { 'Content-Type': 'application/json' };
 
 export default function App() {
   const [lugares, setLugares] = useState([]);
+  const [cargado, setCargado] = useState(false);
+  const [piso, setPiso] = useState(null); // null = pantalla de inicio
   const [error, setError] = useState('');
 
   const cargar = async () => {
     try {
       const r = await fetch(`${API}/lugares?clienteId=${clienteId}`);
       setLugares(await r.json());
+      setCargado(true);
       setError('');
     } catch {
       setError('Sin conexión con el servidor');
@@ -46,6 +53,21 @@ export default function App() {
   }, []);
 
   const mio = lugares.find((l) => l.mia);
+
+  // Si ya tienes una reservación, entra directo al piso de tu espacio
+  useEffect(() => {
+    if (mio) setPiso(mio.nivel);
+  }, [mio?.id]);
+
+  const delPiso = lugares.filter((l) => l.nivel === piso);
+  const resumen = (n) => {
+    const l = lugares.filter((x) => x.nivel === n);
+    return {
+      total: l.length,
+      libres: l.filter((x) => x.estado === 'libre').length,
+      sensores: l.filter((x) => x.sensorEnLinea).length,
+    };
+  };
 
   const reservar = async (l) => {
     if (l.estado !== 'libre') return;
@@ -63,6 +85,7 @@ export default function App() {
     cargar();
   };
 
+  // Panel de pruebas: simula el sensor de un lugar
   const simular = async (l) => {
     await fetch(`${API}/simular`, {
       method: 'POST',
@@ -72,22 +95,81 @@ export default function App() {
     cargar();
   };
 
-  const distancia = mio ? 10 + info(mio.id).col * 8 + 5 : 0;
+  const contenedor = { maxWidth: 420, margin: '0 auto', padding: 12 };
+
+  // ============ PANTALLA DE INICIO ============
+  if (piso === null) {
+    return (
+      <div style={contenedor}>
+        <h1 style={{ textAlign: 'center', margin: '24px 0 4px' }}>Estacionamiento</h1>
+        <p style={{ textAlign: 'center', color: '#6b7280', margin: '0 0 24px' }}>
+          ¿En qué piso quieres estacionarte?
+        </p>
+        {error && <p style={{ color: '#dc2626', textAlign: 'center' }}>{error}</p>}
+        {!cargado && !error && <p style={{ textAlign: 'center', color: '#6b7280' }}>Cargando...</p>}
+
+        {cargado &&
+          PISOS.map((n) => {
+            const r = resumen(n);
+            const lleno = r.libres === 0;
+            return (
+              <button
+                key={n}
+                onClick={() => setPiso(n)}
+                disabled={lleno}
+                style={{
+                  display: 'block', width: '100%', textAlign: 'left', marginBottom: 12,
+                  padding: 16, borderRadius: 16, border: '2px solid #2563eb',
+                  background: lleno ? '#f3f4f6' : '#fff', opacity: lleno ? 0.6 : 1,
+                  cursor: lleno ? 'not-allowed' : 'pointer',
+                }}
+              >
+                <div style={{ fontSize: 22, fontWeight: 700, color: '#111827' }}>Piso {n}</div>
+                <div style={{ fontSize: 16, color: lleno ? '#dc2626' : '#16a34a', fontWeight: 600 }}>
+                  {lleno ? 'Lleno' : `${r.libres} de ${r.total} lugares libres`}
+                </div>
+                <div style={{ fontSize: 13, color: '#6b7280', marginTop: 4 }}>
+                  Sensores en línea: {r.sensores} de {r.total}
+                </div>
+              </button>
+            );
+          })}
+      </div>
+    );
+  }
+
+  // ============ PANTALLA DEL MAPA ============
+  const miInfo = mio ? info(mio.numero) : null;
+  const distancia = mio ? 10 + info(mio.numero).col * 8 + 5 + (mio.nivel - 1) * 25 : 0;
 
   return (
-    <div style={{ maxWidth: 420, margin: '0 auto', padding: 12 }}>
-      <h2 style={{ textAlign: 'center', margin: '8px 0' }}>Ruta al espacio</h2>
+    <div style={contenedor}>
+      <button
+        onClick={() => setPiso(null)}
+        style={{ border: 'none', background: 'none', color: '#2563eb', fontWeight: 700, fontSize: 15, padding: '4px 0' }}
+      >
+        ← Cambiar de piso
+      </button>
+      <h2 style={{ textAlign: 'center', margin: '4px 0' }}>Piso {piso}</h2>
       <p style={{ textAlign: 'center', color: '#6b7280', margin: '0 0 8px' }}>
-        {mio ? 'Sigue la ruta señalada hasta tu espacio' : 'Toca un espacio libre para reservarlo'}
+        {mio && mio.nivel === piso
+          ? 'Sigue la ruta señalada hasta tu espacio'
+          : 'Toca un espacio libre para reservarlo'}
       </p>
       {error && <p style={{ color: '#dc2626', textAlign: 'center' }}>{error}</p>}
+
+      {mio && mio.nivel !== piso && (
+        <p style={{ textAlign: 'center', color: '#2563eb', fontWeight: 600 }}>
+          Tu espacio está en el piso {mio.nivel}
+        </p>
+      )}
 
       <svg viewBox="0 0 380 360" style={{ width: '100%', background: '#e5e7eb', borderRadius: 12 }}>
         <rect x="0" y="140" width="380" height="80" fill="#9ca3af" />
         <line x1="60" y1="180" x2="370" y2="180" stroke="#fff" strokeWidth="2" strokeDasharray="14 10" />
 
-        {lugares.map((l) => {
-          const { cx, arriba } = info(l.id);
+        {delPiso.map((l) => {
+          const { cx, arriba } = info(l.numero);
           const c = COLOR[l.estado];
           const cy = centroY(arriba);
           const by = arriba ? 12 : 348;
@@ -107,33 +189,42 @@ export default function App() {
                 </>
               )}
               <circle cx={cx} cy={by} r="10" fill="#fff" stroke={c.stroke} strokeWidth="2" />
-              <text x={cx} y={by + 4} textAnchor="middle" fontSize="12" fontWeight="700" fill={c.stroke}>{l.id}</text>
+              <text x={cx} y={by + 4} textAnchor="middle" fontSize="12" fontWeight="700" fill={c.stroke}>{l.numero}</text>
+              {/* Indicador del sensor: verde = en línea, gris = sin señal */}
+              <circle cx={cx + 36} cy={rectY(arriba) + 10} r="5" fill={l.sensorEnLinea ? '#16a34a' : '#9ca3af'} stroke="#fff" strokeWidth="1.5" />
             </g>
           );
         })}
 
-        {mio && (
-  <>
-    <defs>
-      <marker id="flecha" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
-        <path d="M0,0 L8,4 L0,8 Z" fill="#1d4ed8" />
-      </marker>
-    </defs>
-    <polyline
-      points={`52,180 ${info(mio.id).cx},180 ${info(mio.id).cx},${info(mio.id).arriba ? 110 : 250}`}
-      fill="none" stroke="#1d4ed8" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round"
-      strokeDasharray="14 10" markerEnd="url(#flecha)"
-    />
-  </>
-)}
+        {mio && mio.nivel === piso && (
+          <>
+            <defs>
+              <marker id="flecha" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto">
+                <path d="M0,0 L8,4 L0,8 Z" fill="#1d4ed8" />
+              </marker>
+            </defs>
+            <polyline
+              points={`52,180 ${miInfo.cx},180 ${miInfo.cx},${miInfo.arriba ? 110 : 250}`}
+              fill="none" stroke="#1d4ed8" strokeWidth="8" strokeLinecap="round" strokeLinejoin="round"
+              strokeDasharray="14 10" markerEnd="url(#flecha)"
+            />
+          </>
+        )}
 
         <rect x="0" y="167" width="52" height="26" rx="8" fill="#111827" />
-        <text x="26" y="184" textAnchor="middle" fontSize="10" fontWeight="700" fill="#fff">ENTRADA</text>
+        <text x="26" y="184" textAnchor="middle" fontSize="10" fontWeight="700" fill="#fff">
+          {piso === 1 ? 'ENTRADA' : 'RAMPA'}
+        </text>
       </svg>
+
+      <p style={{ fontSize: 12, color: '#6b7280', margin: '6px 0 0' }}>
+        <span style={{ color: '#16a34a' }}>●</span> sensor en línea &nbsp;
+        <span style={{ color: '#9ca3af' }}>●</span> sin señal del sensor
+      </p>
 
       {mio && (
         <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, marginTop: 12 }}>
-          <strong>Espacio {mio.id} · Nivel {mio.nivel}</strong>
+          <strong>Espacio {mio.numero} · Piso {mio.nivel}</strong>
           <div style={{ color: '#6b7280', fontSize: 14 }}>Distancia aprox: {distancia} m</div>
           <div style={{ color: '#6b7280', fontSize: 14 }}>Tienes 10 min para llegar</div>
           <button
@@ -148,9 +239,9 @@ export default function App() {
       <details style={{ marginTop: 16 }}>
         <summary>Panel de pruebas (simular sensores)</summary>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
-          {lugares.map((l) => (
+          {delPiso.map((l) => (
             <button key={l.id} onClick={() => simular(l)} style={{ padding: '6px 10px' }}>
-              Lugar {l.id}: {l.estado === 'ocupado' ? 'liberar' : 'ocupar'}
+              Lugar {l.numero} (ESP32 id {l.id}): {l.estado === 'ocupado' ? 'liberar' : 'ocupar'}
             </button>
           ))}
         </div>
