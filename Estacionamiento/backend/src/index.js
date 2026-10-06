@@ -31,6 +31,9 @@ app.get('/api/lugares', async (req, res) => {
         return {
           id: l.id,
           nivel: l.nivel,
+          numero: l.numero,
+          sensorEnLinea:
+            !!l.ultimaLectura && Date.now() - new Date(l.ultimaLectura).getTime() < 120000,
           estado: l.ocupado ? 'ocupado' : r ? 'reservado' : 'libre',
           mia,
           reservacionId: mia ? r.id : null,

@@ -15,12 +15,11 @@ enum EstadoReservacion {
 
 model Lugar {
   id            Int           @id
-  pisoId        Int           @map("piso_id")
+  nivel         Int           @default(1)
+  numero        Int           @default(1)
   ocupado       Boolean       @default(false)
   ultimaLectura DateTime?     @map("ultima_lectura")
   reservaciones Reservacion[]
-  piso          Piso          @relation(fields: [pisoId], references: [id])
-
 
   @@map("lugares")
 }
@@ -35,10 +34,4 @@ model Reservacion {
   lugar     Lugar             @relation(fields: [lugarId], references: [id])
 
   @@map("reservaciones")
-}
-
-model Piso {
-  id      Int      @id @default(autoincrement())
-  lugares Lugar[]
-  @@map("pisos")
 }
