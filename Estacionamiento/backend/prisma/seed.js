@@ -1,9 +1,9 @@
 import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
-await prisma.lugar.createMany({
-  data: [1, 2, 3, 4, 5, 6].map((id) => ({ id })),
+await prisma.piso.createMany({
+  data: [1, 2].map((id) => ({ id })),
   skipDuplicates: true,
 });
-console.log('6 lugares listos');
+console.log('2 pisos listos');
 await prisma.$disconnect();
