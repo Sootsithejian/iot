@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { io } from 'socket.io-client';
 
 const API = import.meta.env.VITE_API_URL || `http://${location.hostname}:4000/api`;
+// El socket se conecta al origen del backend (la misma URL sin el /api final)
+const SOCKET_URL = API.replace(/\/api\/?$/, '');
 
 // Identificador anónimo por celular/navegador
 function obtenerClienteId() {
@@ -29,39 +32,125 @@ const COLOR = {
 
 const json = { 'Content-Type': 'application/json' };
 
+const mismaHora = (a, b) => !!a && !!b && new Date(a).getTime() === new Date(b).getTime();
+
+// Aplica un evento en tiempo real a la lista de lugares.
+// El evento es neutro (no trae de quién es la reservación): "mia" se deduce comparando
+// la hora de vencimiento con la de mi propia reservación.
+function aplicarEvento(lista, ev) {
+  return lista.map((l) => {
+    if (l.id !== ev.id) return l;
+    const mia = l.mia && ev.estado === 'reservado' && mismaHora(ev.expiraEn, l.expiraEn);
+    return {
+      ...l,
+      estado: ev.estado,
+      expiraEn: ev.expiraEn,
+      sensorEnLinea: ev.sensorEnLinea,
+      mia,
+      reservacionId: mia ? l.reservacionId : null,
+    };
+  });
+}
+
 export default function App() {
   const [lugares, setLugares] = useState([]);
   const [cargado, setCargado] = useState(false);
   const [piso, setPiso] = useState(null); // null = pantalla de inicio
   const [error, setError] = useState('');
+  const [enVivo, setEnVivo] = useState(false);
+  const [ahora, setAhora] = useState(Date.now());
 
-  const cargar = async () => {
+  const desfase = useRef(0); // diferencia entre el reloj del servidor y el de este dispositivo
+  const enVuelo = useRef(false); // hay un GET en curso
+  const repetir = useRef(false); // se pidió otro GET mientras había uno en curso
+  const buffer = useRef([]); // eventos recibidos mientras el GET está en curso
+
+  // GET con la foto completa del estacionamiento
+  const cargar = useCallback(async () => {
+    if (enVuelo.current) {
+      repetir.current = true;
+      return;
+    }
+    enVuelo.current = true;
+    buffer.current = [];
     try {
       const r = await fetch(`${API}/lugares?clienteId=${clienteId}`);
-      setLugares(await r.json());
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      desfase.current = data.serverTime - Date.now();
+      // Eventos que llegaron durante el fetch y son más nuevos que la foto
+      const pendientes = buffer.current.filter((e) => e.seq > data.seq);
+      setLugares(pendientes.reduce(aplicarEvento, data.lugares));
       setCargado(true);
       setError('');
     } catch {
+      // Si el GET falló, al menos aplica los eventos que sí llegaron
+      const pendientes = buffer.current;
+      if (pendientes.length) setLugares((prev) => pendientes.reduce(aplicarEvento, prev));
       setError('Sin conexión con el servidor');
+    } finally {
+      buffer.current = [];
+      enVuelo.current = false;
+      if (repetir.current) {
+        repetir.current = false;
+        cargar();
+      }
     }
-  };
-
-  useEffect(() => {
-    cargar();
-    const t = setInterval(cargar, 3000);
-    return () => clearInterval(t);
   }, []);
 
-  const mio = lugares.find((l) => l.mia);
+  useEffect(() => {
+    cargar(); // fetch inicial, en paralelo a la apertura del socket
+    const socket = io(SOCKET_URL);
+
+    // Se ejecuta en la primera conexión y en cada reconexión:
+    // vuelve a sincronizar lo que pudo pasar mientras no había conexión
+    socket.on('connect', () => {
+      setEnVivo(true);
+      cargar();
+    });
+    socket.on('disconnect', () => setEnVivo(false));
+    socket.on('lugar:actualizado', (ev) => {
+      if (enVuelo.current) buffer.current.push(ev);
+      else setLugares((prev) => aplicarEvento(prev, ev));
+    });
+
+    const respaldo = setInterval(cargar, 30000); // respaldo lento (también refresca el indicador de sensores)
+    const reloj = setInterval(() => setAhora(Date.now()), 1000); // para vencer reservaciones en el cliente
+    const alVolver = () => {
+      if (document.visibilityState === 'visible') cargar(); // el celular despertó
+    };
+    document.addEventListener('visibilitychange', alVolver);
+
+    return () => {
+      socket.disconnect();
+      clearInterval(respaldo);
+      clearInterval(reloj);
+      document.removeEventListener('visibilitychange', alVolver);
+    };
+  }, [cargar]);
+
+  // Las reservaciones vencen en el cliente, sin esperar ningún evento del servidor
+  const ahoraServidor = ahora + desfase.current;
+  const vista = useMemo(
+    () =>
+      lugares.map((l) => {
+        const vencida =
+          l.estado === 'reservado' && l.expiraEn && new Date(l.expiraEn).getTime() <= ahoraServidor;
+        return vencida ? { ...l, estado: 'libre', mia: false, reservacionId: null } : l;
+      }),
+    [lugares, ahoraServidor]
+  );
+
+  const mio = vista.find((l) => l.mia);
 
   // Si ya tienes una reservación, entra directo al piso de tu espacio
   useEffect(() => {
     if (mio) setPiso(mio.nivel);
   }, [mio?.id]);
 
-  const delPiso = lugares.filter((l) => l.nivel === piso);
+  const delPiso = vista.filter((l) => l.nivel === piso);
   const resumen = (n) => {
-    const l = lugares.filter((x) => x.nivel === n);
+    const l = vista.filter((x) => x.nivel === n);
     return {
       total: l.length,
       libres: l.filter((x) => x.estado === 'libre').length,
@@ -96,12 +185,18 @@ export default function App() {
   };
 
   const contenedor = { maxWidth: 420, margin: '0 auto', padding: 12 };
+  const indicador = (
+    <p style={{ textAlign: 'center', fontSize: 12, margin: '0 0 4px', color: enVivo ? '#16a34a' : '#9ca3af' }}>
+      {enVivo ? '● En vivo' : '○ Reconectando...'}
+    </p>
+  );
 
   // ============ PANTALLA DE INICIO ============
   if (piso === null) {
     return (
       <div style={contenedor}>
         <h1 style={{ textAlign: 'center', margin: '24px 0 4px' }}>Estacionamiento</h1>
+        {indicador}
         <p style={{ textAlign: 'center', color: '#6b7280', margin: '0 0 24px' }}>
           ¿En qué piso quieres estacionarte?
         </p>
@@ -151,6 +246,7 @@ export default function App() {
         ← Cambiar de piso
       </button>
       <h2 style={{ textAlign: 'center', margin: '4px 0' }}>Piso {piso}</h2>
+      {indicador}
       <p style={{ textAlign: 'center', color: '#6b7280', margin: '0 0 8px' }}>
         {mio && mio.nivel === piso
           ? 'Sigue la ruta señalada hasta tu espacio'
